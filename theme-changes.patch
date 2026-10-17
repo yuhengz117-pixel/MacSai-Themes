@@ -1,0 +1,844 @@
+diff --git a/Sources/MacClean/App/ContentView.swift b/Sources/MacClean/App/ContentView.swift
+index 2621c13..22c9063 100644
+--- a/Sources/MacClean/App/ContentView.swift
++++ b/Sources/MacClean/App/ContentView.swift
+@@ -2,6 +2,7 @@ import SwiftUI
+ import MacCleanKit
+ 
+ struct ContentView: View {
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
+     @Environment(AppState.self) private var appState
+ 
+     /// Module views the user has visited at least once. Once a view is here it
+@@ -24,6 +25,7 @@ struct ContentView: View {
+                 // shown, so the toolbar's collapse-sidebar button is just
+                 // dead weight (#21.4). Remove it.
+                 .toolbar(removing: .sidebarToggle)
++                .navigationSplitViewColumnWidth(min: nativeSkin ? 220 : 180, ideal: nativeSkin ? 240 : 200, max: 320)
+         } detail: {
+             ZStack {
+                 if let item = appState.selectedSidebarItem {
+@@ -70,6 +72,7 @@ struct ContentView: View {
+             }
+             .toolbarBackground(.hidden, for: .windowToolbar)
+         }
++        .tint(.blue)
+         .background(TitleBarConfigurator())
+         // Empty: the system-drawn title pins to the leading edge and on
+         // macOS 26 ignores titleVisibility re-asserts while SwiftUI owns a
+diff --git a/Sources/MacClean/App/MacCleanApp.swift b/Sources/MacClean/App/MacCleanApp.swift
+index ab676d3..c4082d4 100644
+--- a/Sources/MacClean/App/MacCleanApp.swift
++++ b/Sources/MacClean/App/MacCleanApp.swift
+@@ -7,13 +7,14 @@ struct MacCleanApp: App {
+     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+     @State private var appState = AppState()
+     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+-    @AppStorage("showMenuBarWidget") private var showMenuBarWidget = true
++    @AppStorage("showMenuBarWidget") private var showMenuBarWidget = false
+     @AppStorage("menuBarFirstLaunchDone") private var menuBarFirstLaunchDone = false
+     @AppStorage(AppLanguage.defaultsKey, store: SharedAppState.defaults) private var appLanguageRaw = AppLanguage.system.rawValue
+     @State private var showOnboarding = false
+ 
+     init() {
+         AppLanguage.registerDefault(.system)
++        UserDefaults.standard.register(defaults: ["automaticUpdateChecks": false, "showMenuBarWidget": false])
+     }
+ 
+     private var appLanguage: AppLanguage {
+@@ -22,7 +23,7 @@ struct MacCleanApp: App {
+ 
+     var body: some Scene {
+         // A single Window (not WindowGroup) so reopening the app, or following
+-        // a macclean:// deeplink from the menu bar while a window already
++        // a macsai-native:// deeplink from the menu bar while a window already
+         // exists, reuses the one window instead of spawning a second. Combined
+         // with LSMultipleInstancesProhibited in Info.plist (which keeps macOS
+         // from launching a second process), the user never ends up with two
+@@ -46,10 +47,10 @@ struct MacCleanApp: App {
+                     syncMenuBarOnLaunch()
+                 }
+                 .onOpenURL { url in
+-                    // Expect exactly macclean://module/<slug> — one path
++                    // Expect exactly macsai-native://module/<slug> — one path
+                     // segment (pathComponents is ["/", "<slug>"]). Reject
+                     // malformed multi-segment URLs rather than guessing.
+-                    guard url.scheme == "macclean", url.host == "module",
++                    guard url.scheme == "macsai-native", url.host == "module",
+                           url.pathComponents.count == 2,
+                           let id = url.pathComponents.last,
+                           let item = SidebarItem(deepLinkID: id) else { return }
+@@ -99,6 +100,8 @@ struct MacCleanApp: App {
+     /// when the helper bundle path changes (which it doesn't here, but
+     /// re-registering is cheap and idempotent).
+     private func syncMenuBarOnLaunch() {
++        // An unused local helper needs no unregister request to macOS.
++        guard showMenuBarWidget || MenuBarLauncher.shared.isRegistered else { return }
+         if !menuBarFirstLaunchDone {
+             menuBarFirstLaunchDone = true
+             // showMenuBarWidget already defaults to true; setEnabled is
+diff --git a/Sources/MacClean/Core/Cache/Database.swift b/Sources/MacClean/Core/Cache/Database.swift
+index 924df73..4ae720b 100644
+--- a/Sources/MacClean/Core/Cache/Database.swift
++++ b/Sources/MacClean/Core/Cache/Database.swift
+@@ -6,7 +6,7 @@ public final class AppDatabase: Sendable {
+     private let dbPool: DatabasePool
+ 
+     public static let shared: AppDatabase = {
+-        let dbDir = MCConstants.userAppSupport.appending(path: "MacClean")
++        let dbDir = MCConstants.userAppSupport.appending(path: "MacSaiNative")
+         let dbPath = dbDir.appending(path: "cache.sqlite")
+ 
+         try? FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
+diff --git a/Sources/MacClean/Modules/Optimization/LaunchServicesService.swift b/Sources/MacClean/Modules/Optimization/LaunchServicesService.swift
+index 73e3b13..f9e3791 100644
+--- a/Sources/MacClean/Modules/Optimization/LaunchServicesService.swift
++++ b/Sources/MacClean/Modules/Optimization/LaunchServicesService.swift
+@@ -41,7 +41,7 @@ public final class LaunchServicesService: @unchecked Sendable {
+         let home = FileManager.default.homeDirectoryForCurrentUser.path
+         plistPath = "\(home)/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist"
+         backupDir = URL(fileURLWithPath: home)
+-            .appending(path: "Library/Application Support/MacClean/LaunchServicesBackups")
++            .appending(path: "Library/Application Support/MacSaiNative/LaunchServicesBackups")
+         try? FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+     }
+ 
+diff --git a/Sources/MacClean/Services/AppearanceManager.swift b/Sources/MacClean/Services/AppearanceManager.swift
+index a1eb43b..909ac3b 100644
+--- a/Sources/MacClean/Services/AppearanceManager.swift
++++ b/Sources/MacClean/Services/AppearanceManager.swift
+@@ -42,10 +42,8 @@ public enum AppearanceManager {
+ 
+     public static var storedMode: AppearanceMode {
+         let raw = UserDefaults.standard.string(forKey: defaultsKey) ?? ""
+-        // Default to Dark when the user hasn't chosen: the app is designed
+-        // dark-first, so it should open dark out of the box regardless of the
+-        // system setting. Picking "System" opts back into following the OS.
+-        return AppearanceMode(rawValue: raw) ?? .dark
++        // Native edition follows the user's macOS appearance by default.
++        return AppearanceMode(rawValue: raw) ?? .system
+     }
+ 
+     public static func applyStored() {
+diff --git a/Sources/MacClean/Views/Cleanup/SystemJunkView.swift b/Sources/MacClean/Views/Cleanup/SystemJunkView.swift
+index 85adb4a..5796741 100644
+--- a/Sources/MacClean/Views/Cleanup/SystemJunkView.swift
++++ b/Sources/MacClean/Views/Cleanup/SystemJunkView.swift
+@@ -55,7 +55,18 @@ struct SystemJunkView: View {
+         )
+     }
+ 
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
++    @ViewBuilder
+     private var idleView: some View {
++        if nativeSkin {
++            CareModuleWelcome(
++                title: L10n.tr("系统垃圾", "System Junk", "Системный мусор"),
++                subtitle: L10n.tr("查找缓存、日志与临时文件，为重要的内容释放空间。", "Find caches, logs, and temporary files. Make room for what matters.", "Найдите кэш, журналы и временные файлы."),
++                theme: .cleanup, action: { viewModel.startScan() })
++        } else { originalIdleView }
++    }
++
++    private var originalIdleView: some View {
+         VStack(spacing: 28) {
+             Spacer()
+ 
+diff --git a/Sources/MacClean/Views/Settings/SettingsPageView.swift b/Sources/MacClean/Views/Settings/SettingsPageView.swift
+index 2601dc7..a222801 100644
+--- a/Sources/MacClean/Views/Settings/SettingsPageView.swift
++++ b/Sources/MacClean/Views/Settings/SettingsPageView.swift
+@@ -5,7 +5,7 @@ import MacCleanKit
+ 
+ /// In-app Settings page rendered in the detail pane. Opened from the
+ /// pinned sidebar footer, the Cmd-comma "Settings…" menu item, or
+-/// macclean://module/settings. Replaced the separate Settings window
++/// macsai-native://module/settings. Replaced the separate Settings window
+ /// (spec: docs/superpowers/specs/2026-06-05-settings-page-design.md).
+ struct SettingsPageView: View {
+     enum UpdateUIState: Equatable {
+@@ -16,13 +16,14 @@ struct SettingsPageView: View {
+         case failed(message: String)
+     }
+ 
+-    @AppStorage("showMenuBarWidget") private var showMenuBarWidget = true
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
++    @AppStorage("showMenuBarWidget") private var showMenuBarWidget = false
+     @AppStorage(MenuBarMetric.defaultsKey, store: SharedAppState.defaults) private var menuBarMetricRaw = MenuBarMetric.diskFree.rawValue
+     @AppStorage("launchAtLogin") private var launchAtLogin = false
+     @AppStorage("removeBackgroundColors") private var removeBackgroundColors = false
+-    @AppStorage("automaticUpdateChecks") private var automaticUpdateChecks = true
++    @AppStorage("automaticUpdateChecks") private var automaticUpdateChecks = false
+     @AppStorage("lastUpdateCheckDate") private var lastUpdateCheckTimestamp: Double = 0
+-    @AppStorage(AppearanceManager.defaultsKey) private var appearanceRaw = AppearanceMode.dark.rawValue
++    @AppStorage(AppearanceManager.defaultsKey) private var appearanceRaw = AppearanceMode.system.rawValue
+     @AppStorage(AppLanguage.defaultsKey, store: SharedAppState.defaults) private var appLanguageRaw = AppLanguage.system.rawValue
+     @State private var launcher = MenuBarLauncher.shared
+     @State private var loginLauncher = LaunchAtLoginManager.shared
+@@ -243,7 +244,7 @@ struct SettingsPageView: View {
+             .onChange(of: showMenuBarWidget) { _, newValue in
+                 Task { await launcher.setEnabled(newValue) }
+             }
+-            widgetStatusRow
++            if showMenuBarWidget { widgetStatusRow }
+             Picker(selection: $menuBarMetricRaw) {
+                 ForEach(MenuBarMetric.allCases) { metric in
+                     Text(metric.localizedName).tag(metric.rawValue)
+@@ -294,6 +295,15 @@ struct SettingsPageView: View {
+ 
+     private var appearanceSection: some View {
+         Section(L10n.tr("外观", "Appearance", "Оформление")) {
++            Picker(L10n.tr("界面风格", "Interface style", "Стиль интерфейса"), selection: $nativeSkin) {
++                Text("Glass Care").tag(true)
++                Text(L10n.tr("原版渐变", "Original gradients", "Исходные градиенты")).tag(false)
++            }
++            .pickerStyle(.segmented)
++            Text(L10n.tr("模块主题色、立体玻璃视觉与简洁导航。切换立即生效。", "Rich module colors, dimensional glass, and focused navigation. Changes apply immediately.", "Системные цвета, полупрозрачная боковая панель и простые элементы управления."))
++                .font(.caption)
++                .foregroundStyle(.secondary)
++
+             Picker(L10n.tr("主题", "Theme", "Тема"), selection: $appearanceRaw) {
+                 ForEach(AppearanceMode.allCases) { mode in
+                     Text(mode.label).tag(mode.rawValue)
+@@ -313,6 +323,7 @@ struct SettingsPageView: View {
+                 }
+                 Spacer()
+                 Toggle(L10n.tr("移除背景颜色", "Remove background colors", "Убрать цветной фон"), isOn: $removeBackgroundColors)
++                    .disabled(nativeSkin)
+                     .toggleStyle(.switch)
+                     .labelsHidden()
+             }
+diff --git a/Sources/MacClean/Views/Shared/GradientBackground.swift b/Sources/MacClean/Views/Shared/GradientBackground.swift
+index 2d22bd1..390ff7f 100644
+--- a/Sources/MacClean/Views/Shared/GradientBackground.swift
++++ b/Sources/MacClean/Views/Shared/GradientBackground.swift
+@@ -45,6 +45,28 @@ public enum ModuleTheme {
+     /// Full-screen background gradient. Vivid in Dark, soft pastel in Light
+     /// (so the adaptive `.primary`/`.secondary` text stays readable on it).
+     public var colors: [Color] {
++        if NativeSkin.isEnabled { return careColors }
++        return originalColors
++    }
++
++    private var careColors: [Color] {
++        let dark: [UInt32]
++        let light: [UInt32]
++        switch self {
++        case .smartScan: dark = [0x102D36, 0x235052, 0x497565]; light = [0xD3E8E4, 0xEBF5EF]
++        case .cleanup: dark = [0x12341F, 0x2D583A, 0x547343]; light = [0xD8EAD4, 0xEEF5DF]
++        case .protection: dark = [0x362338, 0x63415B, 0x865E6A]; light = [0xEEDFE8, 0xF7EAE7]
++        case .performance: dark = [0x3A3024, 0x65523A, 0x87714C]; light = [0xEFE5CF, 0xF8F1DF]
++        case .applications: dark = [0x272A4C, 0x464871, 0x676592]; light = [0xE3E2F2, 0xEFF0F9]
++        case .files: dark = [0x173249, 0x28536B, 0x487D90]; light = [0xD8E8F0, 0xEAF5F6]
++        case .settings: dark = [0x242936, 0x343D4D]; light = [0xE8ECF2, 0xF6F7FA]
++        }
++        return dark.enumerated().map { index, hex in
++            Color(light: Color(careHex: light[min(index, light.count - 1)]), dark: Color(careHex: hex))
++        }
++    }
++
++    private var originalColors: [Color] {
+         switch self {
+         case .smartScan:
+             [Color(light: Color(red: 0.94, green: 0.91, blue: 0.99), dark: Color(red: 0.22, green: 0.12, blue: 0.55)),
+@@ -79,6 +101,11 @@ public enum ModuleTheme {
+ 
+     /// Buttons stay vivid in both modes so their white labels remain legible.
+     public var buttonColors: [Color] {
++        if NativeSkin.isEnabled { return originalButtonColors }
++        return originalButtonColors
++    }
++
++    private var originalButtonColors: [Color] {
+         switch self {
+         case .smartScan:
+             [Color(red: 0.35, green: 0.22, blue: 0.72), Color(red: 0.52, green: 0.35, blue: 0.88)]
+@@ -100,6 +127,11 @@ public enum ModuleTheme {
+     /// Accent for icons/highlights. Kept vivid (independent of the now-adaptive
+     /// background) so it has contrast on both the light sidebar and dark panels.
+     public var accentColor: Color {
++        if NativeSkin.isEnabled { return originalAccentColor }
++        return originalAccentColor
++    }
++
++    private var originalAccentColor: Color {
+         switch self {
+         case .smartScan: Color(red: 0.42, green: 0.25, blue: 0.82)
+         case .cleanup: Color(red: 0.12, green: 0.55, blue: 0.35)
+@@ -114,6 +146,7 @@ public enum ModuleTheme {
+ 
+ public struct GradientBackgroundView: View {
+     let theme: ModuleTheme
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
+     @AppStorage("removeBackgroundColors") private var removeBackgroundColors = false
+ 
+     public init(theme: ModuleTheme) {
+@@ -121,7 +154,9 @@ public struct GradientBackgroundView: View {
+     }
+ 
+     public var body: some View {
+-        if removeBackgroundColors {
++        if nativeSkin {
++            theme.gradient
++        } else if removeBackgroundColors {
+             neutralGradient
+         } else {
+             theme.gradient
+diff --git a/Sources/MacClean/Views/Shared/ModuleContainerView.swift b/Sources/MacClean/Views/Shared/ModuleContainerView.swift
+index b4445e4..d82b5c0 100644
+--- a/Sources/MacClean/Views/Shared/ModuleContainerView.swift
++++ b/Sources/MacClean/Views/Shared/ModuleContainerView.swift
+@@ -2,6 +2,7 @@ import SwiftUI
+ import MacCleanKit
+ 
+ struct ModuleContainerView: View {
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
+     @AppStorage("removeBackgroundColors") private var removeBackgroundColors = false
+     let title: String
+     let subtitle: String
+@@ -220,7 +221,13 @@ struct ModuleContainerView: View {
+         }
+     }
+ 
++    @ViewBuilder
+     private var idleView: some View {
++        if nativeSkin { CareModuleWelcome(title: title, subtitle: subtitle, theme: theme, action: onScan) }
++        else { originalIdleView }
++    }
++
++    private var originalIdleView: some View {
+         VStack(spacing: 28) {
+             Spacer()
+             VStack(spacing: 10) {
+diff --git a/Sources/MacClean/Views/Shared/ScanButton.swift b/Sources/MacClean/Views/Shared/ScanButton.swift
+index 0338c21..19e498b 100644
+--- a/Sources/MacClean/Views/Shared/ScanButton.swift
++++ b/Sources/MacClean/Views/Shared/ScanButton.swift
+@@ -2,6 +2,7 @@ import SwiftUI
+ import MacCleanKit
+ 
+ public struct ScanButton: View {
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
+     let title: String
+     let subtitle: String?
+     let theme: ModuleTheme
+@@ -28,6 +29,19 @@ public struct ScanButton: View {
+     public var body: some View {
+         if isScanning {
+             scanningContent
++        } else if nativeSkin {
++            Button(action: action) {
++                Label(title, systemImage: "magnifyingglass")
++                    .font(.system(size: 14, weight: .semibold))
++                    .padding(.horizontal, 30)
++                    .padding(.vertical, 10)
++            }
++            .buttonStyle(.borderedProminent)
++            .tint(.white)
++            .foregroundStyle(Color.black)
++            .buttonBorderShape(.capsule)
++            .controlSize(.large)
++            .help(subtitle ?? title)
+         } else {
+             Button(action: action) {
+                 idleContent
+diff --git a/Sources/MacClean/Views/Sidebar/SidebarView.swift b/Sources/MacClean/Views/Sidebar/SidebarView.swift
+index 9f1058a..d9432d3 100644
+--- a/Sources/MacClean/Views/Sidebar/SidebarView.swift
++++ b/Sources/MacClean/Views/Sidebar/SidebarView.swift
+@@ -48,7 +48,7 @@ public enum SidebarItem: String, CaseIterable, Identifiable {
+     public var id: String { rawValue }
+     public var title: String { L10n.tr(rawValue) }
+ 
+-    /// Stable slug used in `macclean://module/<id>` deep links.
++    /// Stable slug used in `macsai-native://module/<id>` deep links.
+     public var deepLinkID: String {
+         switch self {
+         case .smartScan: "smart-scan"
+@@ -166,6 +166,7 @@ public enum SidebarSection: String, CaseIterable, Identifiable {
+ }
+ 
+ public struct SidebarView: View {
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
+     @Binding var selection: SidebarItem?
+     /// Sections the user has collapsed. Native `.sidebar` Sections only reveal
+     /// a collapse chevron on hover and don't fold on a title click, so we render
+@@ -176,7 +177,13 @@ public struct SidebarView: View {
+         self._selection = selection
+     }
+ 
++    @ViewBuilder
+     public var body: some View {
++        if nativeSkin { CareSidebar(selection: $selection) }
++        else { originalBody }
++    }
++
++    private var originalBody: some View {
+         VStack(spacing: 0) {
+             List(selection: $selection) {
+                 ForEach(SidebarSection.allCases) { section in
+@@ -195,11 +202,15 @@ public struct SidebarView: View {
+                 }
+             }
+             .listStyle(.sidebar)
++            .scrollContentBackground(nativeSkin ? .hidden : .automatic)
+ 
+             Divider().opacity(0.4)
+ 
+             settingsFooter
+         }
++        .background {
++            if nativeSkin { Rectangle().fill(.regularMaterial).ignoresSafeArea() }
++        }
+         .frame(
+             minWidth: AppLanguage.current.resolved == .de ? 250 : 180,
+             idealWidth: AppLanguage.current.resolved == .de ? 260 : 200
+@@ -221,7 +232,7 @@ public struct SidebarView: View {
+                 .foregroundStyle(.secondary)
+             Spacer()
+         }
+-        .padding(.top, 6)
++        .padding(.top, nativeSkin ? 12 : 6)
+         .contentShape(Rectangle())
+         .onTapGesture {
+             withAnimation(.easeInOut(duration: 0.18)) {
+@@ -272,6 +283,7 @@ public struct SidebarView: View {
+                 .fontWeight(item == .smartScan ? .semibold : .regular)
+         } icon: {
+             Image(systemName: item.icon)
++                .symbolRenderingMode(.hierarchical)
+                 .foregroundStyle(item.theme.accentColor)
+         }
+         .tag(item)
+diff --git a/Sources/MacClean/Views/SmartScan/SmartScanView.swift b/Sources/MacClean/Views/SmartScan/SmartScanView.swift
+index 116f271..d82b3de 100644
+--- a/Sources/MacClean/Views/SmartScan/SmartScanView.swift
++++ b/Sources/MacClean/Views/SmartScan/SmartScanView.swift
+@@ -102,7 +102,18 @@ struct SmartScanView: View {
+ 
+     // MARK: - Idle
+ 
++    @AppStorage(NativeSkin.defaultsKey) private var nativeSkin = true
++
++    @ViewBuilder
+     private var idleView: some View {
++        if nativeSkin {
++            NativeScanWelcome(startScan: startScan)
++        } else {
++            originalIdleView
++        }
++    }
++
++    private var originalIdleView: some View {
+         VStack(spacing: 28) {
+             Spacer()
+ 
+diff --git a/Sources/MacCleanKit/Constants.swift b/Sources/MacCleanKit/Constants.swift
+index 2d1e414..42ed62a 100644
+--- a/Sources/MacCleanKit/Constants.swift
++++ b/Sources/MacCleanKit/Constants.swift
+@@ -1,10 +1,10 @@
+ import Foundation
+ 
+ public enum MCConstants {
+-    public static let appName = "Mac Sai"
+-    public static let bundleIdentifier = "com.macclean.app"
++    public static let appName = "Mac Sai Native"
++    public static let bundleIdentifier = "com.macclean.native.app"
+     public static let helperBundleIdentifier = "com.macclean.helper"
+-    public static let menuBundleIdentifier = "com.macclean.menu"
++    public static let menuBundleIdentifier = "com.macclean.native.menu"
+ 
+     /// Apple Developer Team ID. The XPC code-signing requirements pin this so
+     /// only our real Developer-ID-signed binaries can talk to the root helper.
+@@ -203,7 +203,7 @@ public enum MCConstants {
+ 
+     // MARK: - Log File Path
+ 
+-    public static let operationLogDir = userLogs.appending(path: "MacClean")
++    public static let operationLogDir = userLogs.appending(path: "MacSaiNative")
+     public static let operationLogFile = operationLogDir.appending(path: "operations.log")
+     /// JSON history of Trash-first cleans for one-click Restore (#223).
+     public static let cleanHistoryFile = operationLogDir.appending(path: "clean-history.json")
+diff --git a/Sources/MacCleanKit/SharedAppState.swift b/Sources/MacCleanKit/SharedAppState.swift
+index 7281439..7a4b725 100644
+--- a/Sources/MacCleanKit/SharedAppState.swift
++++ b/Sources/MacCleanKit/SharedAppState.swift
+@@ -3,7 +3,7 @@ import Foundation
+ /// Inter-process state shared between the main Mac Sai app and the
+ /// menu bar widget. We use a named `UserDefaults` suite — both processes
+ /// open the same suite by name, macOS backs it with a single plist at
+-/// `~/Library/Preferences/com.macclean.shared.plist`, and writes from
++/// `~/Library/Preferences/com.macclean.native.shared.plist`, and writes from
+ /// one process show up in the other on the next read.
+ ///
+ /// App Groups would be the canonical macOS pattern, but a named suite is
+@@ -11,7 +11,7 @@ import Foundation
+ /// is Developer ID signed and notarized, since the shared state is small,
+ /// JSON-serializable, and not security-sensitive.
+ public enum SharedAppState {
+-    public static let suiteName = "com.macclean.shared"
++    public static let suiteName = "com.macclean.native.shared"
+ 
+     public static var defaults: UserDefaults {
+         UserDefaults(suiteName: suiteName) ?? .standard
+diff --git a/Sources/MacCleanMenu/SystemStats/TipsEngine.swift b/Sources/MacCleanMenu/SystemStats/TipsEngine.swift
+index 4f058f3..6d3d976 100644
+--- a/Sources/MacCleanMenu/SystemStats/TipsEngine.swift
++++ b/Sources/MacCleanMenu/SystemStats/TipsEngine.swift
+@@ -105,7 +105,7 @@ public actor TipsEngine {
+ 
+ /// Click-to-act on a tip. `open()` brings the main Mac Sai app to the
+ /// foreground; `open(moduleID:)` additionally deep-links straight to the
+-/// relevant module via the `macclean://module/<id>` URL scheme.
++/// relevant module via the `macsai-native://module/<id>` URL scheme.
+ public enum TipAction {
+     @MainActor
+     public static func open() {
+@@ -117,11 +117,11 @@ public enum TipAction {
+ 
+ public extension TipAction {
+     /// Foreground the main app and deep-link to a specific module via the
+-    /// `macclean://module/<id>` URL scheme. Falls back to plainly opening
++    /// `macsai-native://module/<id>` URL scheme. Falls back to plainly opening
+     /// the app when no module id is available.
+     @MainActor
+     static func open(moduleID: String?) {
+-        guard let moduleID, let url = URL(string: "macclean://module/\(moduleID)") else {
++        guard let moduleID, let url = URL(string: "macsai-native://module/\(moduleID)") else {
+             open()   // fallback: just foreground the app
+             return
+         }
+diff --git a/scripts/build-dmg.sh b/scripts/build-dmg.sh
+index f1eed1e..937f5b1 100755
+--- a/scripts/build-dmg.sh
++++ b/scripts/build-dmg.sh
+@@ -17,8 +17,8 @@
+ 
+ set -euo pipefail
+ 
+-APP_NAME="Mac Sai"
+-BUNDLE_ID="com.macclean.app"
++APP_NAME="Mac Sai Native"
++BUNDLE_ID="com.macclean.native.app"
+ VERSION="${VERSION:-$(cat VERSION 2>/dev/null | tr -d '[:space:]' || echo '1.0.0')}"
+ # BUILD_DIR is resolved AFTER the build via `swift build --show-bin-path`:
+ # multi-arch builds emit to .build/apple/Products/Release/ while single-arch
+@@ -26,7 +26,7 @@ VERSION="${VERSION:-$(cat VERSION 2>/dev/null | tr -d '[:space:]' || echo '1.0.0
+ # them silently bundles stale binaries from the other (a 1.9.0 app shipped in
+ # a 1.10.0 wrapper during dev-install testing — binary and Info.plist drift).
+ DMG_DIR=".build/dmg"
+-DMG_NAME="MacSai-${VERSION}.dmg"
++DMG_NAME="MacSai-Native-${VERSION}.dmg"
+ 
+ # Detect signing capability
+ APP_ONLY=false
+@@ -123,7 +123,7 @@ cat > "${APP_BUNDLE}/Contents/Info.plist" << PLIST
+             <string>com.macclean.deeplink</string>
+             <key>CFBundleURLSchemes</key>
+             <array>
+-                <string>macclean</string>
++                <string>macsai-native</string>
+             </array>
+         </dict>
+     </array>
+@@ -166,7 +166,7 @@ cat > "${MENU_APP}/Contents/Info.plist" << MENU_PLIST
+     <key>CFBundleExecutable</key>
+     <string>MacCleanMenu</string>
+     <key>CFBundleIdentifier</key>
+-    <string>com.macclean.menu</string>
++    <string>com.macclean.native.menu</string>
+     <key>CFBundleInfoDictionaryVersion</key>
+     <string>6.0</string>
+     <key>CFBundleName</key>
+diff --git a/NATIVE-SKIN.md b/NATIVE-SKIN.md
+new file mode 100644
+index 0000000..3e60feb
+--- /dev/null
++++ b/NATIVE-SKIN.md
+@@ -0,0 +1,61 @@
++# Mac Sai Native
++
++Local macOS appearance edition based on upstream Mac Sai v1.25.3.
++
++## Use
++
++Open **Mac Sai Native.app**. Go to Settings → Appearance → Interface style.
++Choose **macOS Native** or **Original gradients**. The choice persists and
++applies immediately. Light, Dark, and System are available separately.
++Native is the default style; System is the default appearance.
++
++## Design
++
++- Semantic AppKit colors adapt to light, dark, and increased contrast.
++- System type, hierarchical SF Symbols, standard push buttons and focus behavior.
++- Material reserved for the sidebar; content uses an opaque, quiet surface.
++- Smart Scan has three working navigation shortcuts; no fabricated statistics.
++- Scan and cleanup logic and confirmations remain upstream behavior.
++
++## Local edition
++
++The app has its own name, bundle ID, preferences, cache database, log folder,
++and URL scheme. The official app is not replaced. Automatic update checks
++and the menu bar helper default to off for this local build. Installing an
++upstream release does not add this appearance to the official app.
++
++This is an ad-hoc signed local build, not an Apple-notarized upstream release.
++Some modules may need Full Disk Access granted separately by the user. No
++security permissions are granted by this project. The upstream privileged
++helper's signing requirements are unchanged.
++
++## Rebuild
++
++```sh
++BUILD_ARCHS="--arch arm64" bash scripts/build-dmg.sh --app-only
++```
++
++Source remains under the upstream BSD-3-Clause license (see LICENSE).
++
++## Design review
++
++| Apple principle | Result in this edition |
++| --- | --- |
++| Purpose | Scan is the main action; space, apps, and disk have direct entries. |
++| Agency | Original appearance remains selectable; cleanup confirmations are retained. |
++| Responsibility | No new scan destinations or deletion capabilities. |
++| Familiarity | Native split navigation, system colors, SF Symbols, grouped settings. |
++| Flexibility | System/light/dark appearance and resizable, scrolling content. |
++| Simplicity | One accent and a quiet surface replace full-pane color gradients. |
++| Craft | Shared scan controls and module colors use the same visual rules. |
++| Delight | Restrained material and hierarchy; no new decorative animation. |
++
++## Validation on this Mac
++
++- Apple Silicon release compilation completed successfully.
++- Installed app passed `codesign --verify --deep --strict`.
++- Inspected actual light and dark windows; verified original/native switching.
++- Verified the home shortcut navigates to System Junk without starting a scan.
++- Relaunched the final build and confirmed native/system preferences persist.
++- Confirmed Settings no longer reports an unregister error with the widget off.
++- No cleanup operation was executed; no claim of full backend regression testing.
+diff --git a/GLASS-CARE.md b/GLASS-CARE.md
+new file mode 100644
+index 0000000..38c9cfa
+--- /dev/null
++++ b/GLASS-CARE.md
+@@ -0,0 +1,23 @@
++# Glass Care appearance
++
++Follow-up to the original Native edition, requested to feel closer to
++CleanMyMac. This replaces the Native appearance under the existing preference
++key, so the installed local edition opens with the new design automatically.
++
++- Compact dark navigation with six primary destinations and an All tools disclosure.
++- Per-module gradient backgrounds and original code-drawn glass illustrations.
++- Smart Care welcome panel with working Cleanup, Protection, and Performance links.
++- Shared scanning welcome panels for System Junk and ModuleContainer modules.
++- Original gradient mode remains selectable in Settings → Appearance.
++- Deep/light behavior, upstream scans, result selection, and cleanup confirmations remain.
++
++The reference is MacPaw's public product screenshots, not bundled assets:
++https://macpaw.com/cleanmymac
++All orb artwork is drawn in SwiftUI. No CleanMyMac marks or illustrations are shipped.
++
++This is a local ad-hoc signed build, not an official MacPaw or Mac Sai release.
++
++Validation: Apple Silicon release build and strict local code-signature check
++passed. Inspected actual dark and light windows, opened the System Junk
++welcome from navigation, and expanded All tools to confirm remaining modules
++are reachable. No cleanup or maintenance operation was executed.
+diff --git a/Sources/MacClean/Views/Shared/NativeSkin.swift b/Sources/MacClean/Views/Shared/NativeSkin.swift
+new file mode 100644
+index 0000000..692aaf3
+--- /dev/null
++++ b/Sources/MacClean/Views/Shared/NativeSkin.swift
+@@ -0,0 +1,190 @@
++import SwiftUI
++import AppKit
++import MacCleanKit
++
++enum NativeSkin {
++    static let defaultsKey = "nativeMacSkin"
++    static var isEnabled: Bool { UserDefaults.standard.object(forKey: defaultsKey) as? Bool ?? true }
++}
++
++/// Original, code-drawn glass instrument. No MacPaw artwork or branding.
++struct CareOrb: View {
++    let color: Color
++    var symbol = "sparkles"
++    var body: some View {
++        ZStack {
++            Circle().fill(color.opacity(0.25)).blur(radius: 25).padding(-12)
++            Circle().fill(RadialGradient(colors: [.white.opacity(0.75), color.opacity(0.65), color.opacity(0.15), .black.opacity(0.5)], center: .topLeading, startRadius: 5, endRadius: 235))
++            Circle().strokeBorder(LinearGradient(colors: [.white.opacity(0.85), color, .white.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2)
++            Circle().fill(LinearGradient(colors: [.white.opacity(0.8), .white.opacity(0.12)], startPoint: .top, endPoint: .bottom))
++                .frame(width: 112, height: 112)
++                .shadow(color: .black.opacity(0.24), radius: 18, y: 14)
++            Image(systemName: symbol).font(.system(size: 48, weight: .medium)).foregroundStyle(color)
++            Ellipse().fill(.white.opacity(0.32)).frame(width: 118, height: 29).blur(radius: 8).rotationEffect(.degrees(-28)).offset(x: -36, y: -72)
++        }
++        .frame(width: 225, height: 225)
++        .shadow(color: .black.opacity(0.22), radius: 22, y: 18)
++        .accessibilityHidden(true)
++    }
++}
++
++struct NativeScanWelcome: View {
++    @Environment(AppState.self) private var appState
++    @Environment(\.colorScheme) private var scheme
++    let startScan: () -> Void
++    var body: some View {
++        GeometryReader { geometry in
++            ScrollView {
++                VStack(alignment: .leading, spacing: 26) {
++                    VStack(alignment: .leading, spacing: 8) {
++                        Text(L10n.tr("智能养护", "Smart Care", "Умный уход"))
++                            .font(.system(size: 34, weight: .bold))
++                        Text(L10n.tr("让 Mac 焕然一新，给重要的事留出空间。", "A fresh start for your Mac. More room for what matters.", "Освободите место для самого важного."))
++                            .font(.system(size: 14)).foregroundStyle(.secondary)
++                    }
++                    ViewThatFits(in: .horizontal) {
++                        HStack(spacing: 30) {
++                            CareOrb(color: .cyan)
++                            introduction.frame(width: 260, alignment: .leading)
++                        }
++                        VStack(spacing: 24) {
++                            CareOrb(color: .cyan)
++                            introduction
++                        }
++                    }
++                    .padding(30)
++                    .frame(maxWidth: .infinity, minHeight: 300)
++                    .background(.white.opacity(scheme == .dark ? 0.12 : 0.42), in: RoundedRectangle(cornerRadius: 28))
++                    .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(.white.opacity(0.22)))
++
++                    HStack(spacing: 18) {
++                        tool(.systemJunk, "internaldrive.fill", L10n.tr("清理", "Cleanup", "Очистка"), .green)
++                        tool(.malwareRemoval, "shield.lefthalf.filled", L10n.tr("防护", "Protection", "Защита"), .orange)
++                        tool(.optimization, "bolt.fill", L10n.tr("性能", "Performance", "Скорость"), .purple)
++                    }
++                }
++                .frame(maxWidth: 850)
++                .padding(32)
++                .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .center)
++            }
++        }
++    }
++    private var introduction: some View {
++        VStack(alignment: .leading, spacing: 16) {
++            Text(L10n.tr("轻盈，从一次扫描开始", "Meet your Mac at its best", "Ваш Mac в лучшей форме"))
++                .font(.system(size: 24, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
++            Text(L10n.tr("查找垃圾文件，检查潜在威胁，了解性能状况。扫描完成后，由你选择处理哪些项目。", "Find clutter, check for potential threats, and review performance. Scan first, then choose what to clean.", "Найдите лишние файлы и проверьте безопасность. Решение об очистке за вами."))
++                .font(.system(size: 14)).foregroundStyle(.secondary).lineSpacing(4).fixedSize(horizontal: false, vertical: true)
++            ScanButton(title: L10n.tr("开始扫描", "Start Scan", "Сканировать"), action: startScan)
++                .padding(.top, 6)
++        }
++    }
++    private func tool(_ item: SidebarItem, _ icon: String, _ title: String, _ color: Color) -> some View {
++        Button { appState.selectedSidebarItem = item } label: {
++            HStack(spacing: 10) {
++                Image(systemName: icon).font(.system(size: 17)).foregroundStyle(color)
++                Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(.primary)
++                Spacer(minLength: 0)
++                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
++            }
++            .padding(.vertical, 15).padding(.horizontal, 14)
++            .background(.white.opacity(scheme == .dark ? 0.08 : 0.35), in: RoundedRectangle(cornerRadius: 14))
++            .contentShape(RoundedRectangle(cornerRadius: 14))
++        }.buttonStyle(.plain)
++    }
++}
++
++struct CareSidebar: View {
++    @Binding var selection: SidebarItem?
++    @State private var showAllTools = false
++    private let primary: [SidebarItem] = [.smartScan, .systemJunk, .malwareRemoval, .optimization, .uninstaller, .spaceLens]
++    var body: some View {
++        VStack(alignment: .leading, spacing: 0) {
++            HStack(spacing: 10) {
++                Image(systemName: "sparkles").foregroundStyle(.cyan).font(.system(size: 20, weight: .semibold))
++                Text("Mac Sai").font(.system(size: 20, weight: .bold)).foregroundStyle(.white)
++            }.padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 28)
++            ScrollView {
++                VStack(spacing: 7) {
++                    ForEach(primary) { item in row(item) }
++                    Divider().overlay(.white.opacity(0.1)).padding(.vertical, 12)
++                    DisclosureGroup(isExpanded: $showAllTools) {
++                        VStack(spacing: 4) {
++                            ForEach(SidebarItem.allCases.filter { !primary.contains($0) && $0 != .settings }) { item in row(item) }
++                        }.padding(.top, 10)
++                    } label: {
++                        Text(L10n.tr("全部工具", "All tools", "Все инструменты"))
++                            .font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.65))
++                    }.tint(.white.opacity(0.6)).padding(.horizontal, 10)
++                }.padding(.horizontal, 10)
++            }
++            row(.settings).padding(10)
++        }
++        .background(LinearGradient(colors: [Color(red: 0.10, green: 0.12, blue: 0.22), Color(red: 0.07, green: 0.08, blue: 0.15)], startPoint: .topLeading, endPoint: .bottomTrailing).ignoresSafeArea())
++    }
++    private func row(_ item: SidebarItem) -> some View {
++        Button { selection = item } label: {
++            HStack(spacing: 12) {
++                Image(systemName: item.icon)
++                    .font(.system(size: 16, weight: .medium))
++                    .foregroundStyle(item.theme.accentColor)
++                    .frame(width: 30, height: 32)
++                    .background(item.theme.accentColor.opacity(0.15), in: RoundedRectangle(cornerRadius: 9))
++                Text(item == .smartScan ? L10n.tr("智能养护", "Smart Care", "Умный уход") : item.title)
++                    .font(.system(size: 13, weight: selection == item ? .semibold : .medium))
++                    .foregroundStyle(.white.opacity(selection == item ? 1 : 0.78))
++                    .lineLimit(2)
++                Spacer(minLength: 0)
++            }.padding(.horizontal, 10).padding(.vertical, 8)
++                .background(.white.opacity(selection == item ? 0.12 : 0), in: RoundedRectangle(cornerRadius: 12))
++                .contentShape(RoundedRectangle(cornerRadius: 12))
++        }.buttonStyle(.plain)
++            .accessibilityAddTraits(selection == item ? [.isSelected] : [])
++    }
++}
++
++struct CareModuleWelcome: View {
++    let title: String
++    let subtitle: String
++    let theme: ModuleTheme
++    let action: () -> Void
++    @Environment(\.colorScheme) private var scheme
++    var body: some View {
++        ScrollView {
++            VStack(spacing: 28) {
++                CareOrb(color: theme.accentColor, symbol: symbol)
++                VStack(spacing: 10) {
++                    Text(title).font(.system(size: 30, weight: .bold))
++                    Text(subtitle).font(.system(size: 14)).foregroundStyle(.secondary)
++                        .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
++                }
++                ScanButton(title: L10n.tr("扫描", "Scan", "Сканировать"), theme: theme, action: action)
++            }
++            .frame(maxWidth: 480)
++            .padding(32)
++            .background(.white.opacity(scheme == .dark ? 0.10 : 0.35), in: RoundedRectangle(cornerRadius: 28))
++            .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(.white.opacity(0.2)))
++            .padding(30)
++            .frame(maxWidth: .infinity)
++        }
++        .defaultScrollAnchor(.center)
++    }
++    private var symbol: String {
++        switch theme {
++        case .cleanup: "sparkles"
++        case .protection: "shield.lefthalf.filled"
++        case .performance: "bolt.fill"
++        case .applications: "square.stack.3d.up.fill"
++        case .files: "folder.fill"
++        case .smartScan, .settings: "sparkles"
++        }
++    }
++}
++
++extension Color {
++    init(careHex: UInt32) {
++        self.init(red: Double((careHex >> 16) & 255) / 255,
++                  green: Double((careHex >> 8) & 255) / 255,
++                  blue: Double(careHex & 255) / 255)
++    }
++}
